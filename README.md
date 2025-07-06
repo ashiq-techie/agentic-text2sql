@@ -48,7 +48,7 @@ The system stores Oracle database schema in Neo4j with the following structure:
 Database (root)
 ├── HAS_TABLE → Table Nodes
     ├── HAS_COLUMN → Column Nodes
-    └── HAS_FOREIGN_KEY → Other Column Nodes
+    └── HAS_FOREIGN_KEY → Other Column Nodes (explicit + inferred)
 ```
 
 **Node Types:**
@@ -60,6 +60,27 @@ Database (root)
 - **HAS_TABLE**: Database → Table
 - **HAS_COLUMN**: Table → Column
 - **HAS_FOREIGN_KEY**: Column → Column (foreign key relationships)
+  - **Explicit**: From Oracle constraint tables
+  - **Inferred**: From naming conventions (e.g., `ID_LFC` → `LIFECYCLE.ID`)
+
+### 🔍 Foreign Key Inference
+
+The system automatically infers foreign key relationships from naming conventions:
+
+**Supported Patterns (case-insensitive):**
+- `{TABLE}_ID` → Points to `TABLE.ID`
+- `ID_{TABLE}` → Points to `TABLE.ID`
+- `{TABLE}_KEY` → Points to `TABLE` primary key
+- `{TABLE}_FK` → Points to `TABLE` primary key
+- Mixed case: `Id_Lfc` → `LifeCycle.Id`
+- Abbreviations: `LFC_ID` → `LIFECYCLE.ID`
+
+**Features:**
+- **Case-insensitive matching**: Handles mixed case table/column names
+- **Fuzzy matching**: For abbreviated table names
+- **Configurable similarity thresholds**
+- **Confidence scoring**: For inferred relationships
+- **Avoids duplicating**: Explicit constraints
 
 ## 🛠️ Installation
 
@@ -173,6 +194,11 @@ GET /schema/search?query=user%20profile&similarity_threshold=0.6
 GET /schema/context?table_names=USERS,USER_PROFILES
 ```
 
+**Get Inferred Relationships:**
+```bash
+GET /schema/inferred-relationships
+```
+
 #### Health Check
 ```bash
 GET /health
@@ -201,9 +227,10 @@ The agent follows a systematic 5-step process:
 - "List users who haven't logged in for 30 days"
 
 ### Fuzzy Matching Examples
-- "LFC data" → Finds `LIFECYCLE` tables
-- "usr info" → Finds `USER_INFORMATION` tables
-- "ord status" → Finds `ORDER_STATUS` columns
+- "LFC data" → Finds `LIFECYCLE` or `LifeCycle` tables
+- "usr info" → Finds `USER_INFORMATION` or `User_Information` tables
+- "ord status" → Finds `ORDER_STATUS` or `Order_Status` columns
+- Mixed case: `Id_Usr` → Matches `USER_PROFILES.Id_Usr` → `Users.Id`
 
 ## 🔧 Configuration
 
@@ -221,6 +248,8 @@ The agent follows a systematic 5-step process:
 | `OPENAI_MODEL` | OpenAI model | `gpt-4-turbo-preview` |
 | `API_HOST` | API host | `0.0.0.0` |
 | `API_PORT` | API port | `8000` |
+| `ENABLE_FK_INFERENCE` | Enable foreign key inference | `true` |
+| `FK_INFERENCE_SIMILARITY_THRESHOLD` | Similarity threshold for FK inference | `0.7` |
 
 ### Performance Tuning
 

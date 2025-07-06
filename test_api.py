@@ -159,11 +159,48 @@ class APITester:
         
         print(f"\n📈 Overall: {success_count}/{total_tests} tests passed")
         return results
+    
+    def test_case_insensitive_patterns(self):
+        """Test case-insensitive pattern matching locally."""
+        print("\n🔤 Testing case-insensitive pattern matching...")
+        
+        # Import the introspector for local testing
+        try:
+            from schema_introspection import SchemaIntrospector
+            introspector = SchemaIntrospector()
+            
+            test_cases = [
+                ("Id_Lfc", "{table}_ID", True),
+                ("ID_usr", "ID_{table}", True),
+                ("Usr_Key", "{table}_KEY", True),
+                ("orderID", "{table}ID", True),
+                ("IDorder", "ID{table}", True),
+                ("notamatch", "{table}_ID", False)
+            ]
+            
+            for column_name, pattern, expected in test_cases:
+                result = introspector._matches_fk_pattern(column_name, pattern)
+                status = "✅" if result == expected else "❌"
+                print(f"   {status} {column_name} matches {pattern}: {result} (expected: {expected})")
+                
+                if result:
+                    refs = introspector._extract_table_references(column_name, pattern)
+                    print(f"       → Extracted references: {refs}")
+            
+            print("   Case-insensitive pattern matching test completed!")
+            
+        except ImportError:
+            print("   ⚠️  Could not import schema_introspection for local testing")
 
 
 async def main():
     """Run the test suite."""
     tester = APITester()
+    
+    # Run case-insensitive pattern tests first (local)
+    tester.test_case_insensitive_patterns()
+    
+    # Run API tests
     results = await tester.run_all_tests()
     
     # Save results to file

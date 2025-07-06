@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     max_query_timeout: int = Field(default=30, env="MAX_QUERY_TIMEOUT")
     max_results_limit: int = Field(default=1000, env="MAX_RESULTS_LIMIT")
     
+    # Schema Inference Configuration
+    enable_fk_inference: bool = Field(default=True, env="ENABLE_FK_INFERENCE")
+    fk_inference_similarity_threshold: float = Field(default=0.7, env="FK_INFERENCE_SIMILARITY_THRESHOLD")
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

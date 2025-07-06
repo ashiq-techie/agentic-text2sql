@@ -252,6 +252,31 @@ async def get_schema_context_endpoint(table_names: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/schema/inferred-relationships")
+async def get_inferred_relationships_endpoint():
+    """
+    Endpoint to get all inferred foreign key relationships.
+    
+    Returns relationships that were inferred from naming conventions
+    along with confidence scores and statistics.
+    """
+    try:
+        logger.info("Getting inferred foreign key relationships")
+        
+        validation_results = await schema_introspector.validate_inferred_relationships()
+        
+        return {
+            "message": "Inferred foreign key relationships retrieved successfully",
+            "inference_enabled": settings.enable_fk_inference,
+            "similarity_threshold": settings.fk_inference_similarity_threshold,
+            **validation_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Get inferred relationships failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/metrics")
 async def get_metrics():
     """

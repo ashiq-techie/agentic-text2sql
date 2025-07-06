@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from clients import neo4j_client, oracle_client
 from schemas import SchemaNode, SchemaRelationship, SchemaGraph
 from fuzzywuzzy import fuzz
+from config import settings
 import asyncio
 
 logger = logging.getLogger(__name__)
@@ -123,11 +124,28 @@ class SchemaIntrospector:
                 type="HAS_FOREIGN_KEY",
                 properties={
                     "constraint_name": fk['CONSTRAINT_NAME'],
-                    "r_constraint_name": fk['R_CONSTRAINT_NAME']
+                    "r_constraint_name": fk['R_CONSTRAINT_NAME'],
+                    "inferred": False
                 }
             ))
         
+        # Infer additional foreign key relationships from naming conventions (if enabled)
+        inferred_relationships = []
+        if settings.enable_fk_inference:
+            inferred_relationships = await self._infer_foreign_keys_from_naming(nodes, relationships)
+            
+            # Add inferred relationships and update column properties
+            for rel in inferred_relationships:
+                relationships.append(rel)
+                # Mark source column as foreign key
+                for node in nodes:
+                    if node.id == rel.source_id:
+                        node.properties["is_foreign_key"] = True
+                        break
+        
         logger.info(f"Schema introspection complete. Found {len(nodes)} nodes and {len(relationships)} relationships")
+        if settings.enable_fk_inference:
+            logger.info(f"Inferred {len(inferred_relationships)} additional foreign key relationships from naming conventions")
         return SchemaGraph(nodes=nodes, relationships=relationships)
     
     async def _get_tables(self, schema_name: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -234,6 +252,210 @@ class SchemaIntrospector:
         
         return await self.oracle.query(query, parameters)
     
+    async def _infer_foreign_keys_from_naming(self, nodes: List[SchemaNode], existing_relationships: List[SchemaRelationship]) -> List[SchemaRelationship]:
+        """Infer foreign key relationships from column naming conventions."""
+        logger.info("Inferring foreign key relationships from naming conventions")
+        
+        # Extract table names and column information
+        table_names = []
+        column_info = {}  # {table_name: [column_nodes]}
+        
+        for node in nodes:
+            if node.type == "table":
+                table_names.append(node.name)
+                column_info[node.name] = []
+            elif node.type == "column":
+                table_name = node.properties.get("table")
+                if table_name not in column_info:
+                    column_info[table_name] = []
+                column_info[table_name].append(node)
+        
+        # Get existing foreign key relationships to avoid duplicates
+        existing_fk_pairs = set()
+        for rel in existing_relationships:
+            if rel.type == "HAS_FOREIGN_KEY":
+                existing_fk_pairs.add((rel.source_id, rel.target_id))
+        
+        inferred_relationships = []
+        
+        # Common foreign key naming patterns
+        fk_patterns = [
+            "{table}_ID",
+            "ID_{table}",
+            "{table}_KEY",
+            "{table}_FK",
+            "{table}ID",  # No underscore
+            "ID{table}"   # No underscore
+        ]
+        
+        # For each table's columns
+        for table_name, columns in column_info.items():
+            for column in columns:
+                column_name = column.name  # Keep original case
+                
+                # Check each naming pattern
+                for pattern in fk_patterns:
+                    # Check if column matches any pattern (case-insensitive)
+                    if self._matches_fk_pattern(column_name, pattern):
+                        # Extract the potential table reference from column name
+                        potential_table_refs = self._extract_table_references(column_name, pattern)
+                        
+                                                 # Find matching tables using fuzzy matching
+                         for ref in potential_table_refs:
+                             matched_table = self._find_matching_table(ref, table_names, settings.fk_inference_similarity_threshold)
+                             if matched_table and matched_table != table_name:
+                                # Find the primary key column of the matched table
+                                pk_column = self._find_primary_key_column(matched_table, column_info)
+                                if pk_column:
+                                    source_id = column.id
+                                    target_id = pk_column.id
+                                    
+                                    # Check if this relationship already exists
+                                    if (source_id, target_id) not in existing_fk_pairs:
+                                        inferred_relationships.append(SchemaRelationship(
+                                            source_id=source_id,
+                                            target_id=target_id,
+                                            type="HAS_FOREIGN_KEY",
+                                            properties={
+                                                "constraint_name": f"INFERRED_{table_name}_{column_name}",
+                                                "inferred": True,
+                                                "inference_method": "naming_convention",
+                                                "pattern_used": pattern,
+                                                "confidence": self._calculate_confidence(ref, matched_table)
+                                            }
+                                        ))
+                                        existing_fk_pairs.add((source_id, target_id))
+                                        logger.debug(f"Inferred FK: {table_name}.{column_name} -> {matched_table}.{pk_column.name}")
+        
+        logger.info(f"Inferred {len(inferred_relationships)} foreign key relationships from naming conventions")
+        return inferred_relationships
+    
+    def _matches_fk_pattern(self, column_name: str, pattern: str) -> bool:
+        """Check if a column name matches a foreign key pattern (case-insensitive)."""
+        if "{table}" not in pattern:
+            return False
+        
+        # Convert to uppercase for case-insensitive comparison
+        column_upper = column_name.upper()
+        pattern_upper = pattern.upper()
+        
+        # Convert pattern to regex-like check
+        if pattern_upper.startswith("{TABLE}"):
+            suffix = pattern_upper.replace("{TABLE}", "")
+            return column_upper.endswith(suffix) and len(column_upper) > len(suffix)
+        elif pattern_upper.endswith("{TABLE}"):
+            prefix = pattern_upper.replace("{TABLE}", "")
+            return column_upper.startswith(prefix) and len(column_upper) > len(prefix)
+        else:
+            # Pattern has {table} in middle
+            parts = pattern_upper.split("{TABLE}")
+            if len(parts) == 2:
+                prefix, suffix = parts
+                return column_upper.startswith(prefix) and column_upper.endswith(suffix) and len(column_upper) > len(prefix) + len(suffix)
+        
+        return False
+    
+    def _extract_table_references(self, column_name: str, pattern: str) -> List[str]:
+        """Extract potential table references from a column name using the pattern (case-insensitive)."""
+        references = []
+        
+        # Work with uppercase for pattern matching but preserve original case where possible
+        column_upper = column_name.upper()
+        pattern_upper = pattern.upper()
+        
+        if pattern_upper.startswith("{TABLE}"):
+            suffix = pattern_upper.replace("{TABLE}", "")
+            if column_upper.endswith(suffix):
+                # Extract the reference part, preserving original case
+                ref_length = len(column_name) - len(suffix)
+                ref = column_name[:ref_length] if suffix else column_name
+                references.append(ref)
+        elif pattern_upper.endswith("{TABLE}"):
+            prefix = pattern_upper.replace("{TABLE}", "")
+            if column_upper.startswith(prefix):
+                # Extract the reference part, preserving original case
+                ref = column_name[len(prefix):] if prefix else column_name
+                references.append(ref)
+        else:
+            # Pattern has {table} in middle
+            parts = pattern_upper.split("{TABLE}")
+            if len(parts) == 2:
+                prefix, suffix = parts
+                if column_upper.startswith(prefix) and column_upper.endswith(suffix):
+                    # Extract the reference part, preserving original case
+                    start_idx = len(prefix)
+                    end_idx = len(column_name) - len(suffix) if suffix else len(column_name)
+                    ref = column_name[start_idx:end_idx]
+                    references.append(ref)
+        
+        return [ref for ref in references if ref]  # Remove empty strings
+    
+    def _find_matching_table(self, reference: str, table_names: List[str], min_similarity: float = 0.7) -> Optional[str]:
+        """Find the best matching table name using fuzzy matching (case-insensitive)."""
+        best_match = None
+        best_score = 0
+        
+        for table_name in table_names:
+            # Direct match (case-insensitive)
+            if reference.upper() == table_name.upper():
+                return table_name
+            
+            # Fuzzy match (case-insensitive)
+            score = fuzz.ratio(reference.upper(), table_name.upper()) / 100.0
+            if score > best_score and score >= min_similarity:
+                best_score = score
+                best_match = table_name
+            
+            # Check if reference is a substring of table name (for abbreviations)
+            if reference.upper() in table_name.upper() and len(reference) >= 3:
+                substring_score = len(reference) / len(table_name)
+                if substring_score > 0.3:  # At least 30% of table name
+                    adjusted_score = score * 1.2  # Boost score for substring matches
+                    if adjusted_score > best_score and adjusted_score >= min_similarity:
+                        best_score = adjusted_score
+                        best_match = table_name
+        
+        return best_match
+    
+    def _find_primary_key_column(self, table_name: str, column_info: Dict[str, List[SchemaNode]]) -> Optional[SchemaNode]:
+        """Find the primary key column for a table (case-insensitive matching)."""
+        if table_name not in column_info:
+            return None
+        
+        # First, look for explicitly marked primary key columns
+        for column in column_info[table_name]:
+            if column.properties.get("is_primary_key"):
+                return column
+        
+        # If no explicit PK, look for common PK naming patterns (case-insensitive)
+        pk_patterns = ["ID", f"{table_name}_ID", f"ID_{table_name}", f"{table_name}ID"]
+        
+        for pattern in pk_patterns:
+            for column in column_info[table_name]:
+                if column.name.upper() == pattern.upper():
+                    return column
+        
+        # If still no match, return the first column (as a fallback)
+        if column_info[table_name]:
+            return column_info[table_name][0]
+        
+        return None
+    
+    def _calculate_confidence(self, reference: str, matched_table: str) -> float:
+        """Calculate confidence score for the inferred relationship (case-insensitive)."""
+        # Base confidence on fuzzy match score (case-insensitive)
+        confidence = fuzz.ratio(reference.upper(), matched_table.upper()) / 100.0
+        
+        # Boost confidence for exact matches (case-insensitive)
+        if reference.upper() == matched_table.upper():
+            confidence = 1.0
+        
+        # Boost confidence for substring matches (abbreviations)
+        elif reference.upper() in matched_table.upper():
+            confidence = min(confidence * 1.1, 1.0)
+        
+        return round(confidence, 2)
+    
     async def store_schema_in_neo4j(self, schema: SchemaGraph) -> None:
         """Store the schema graph in Neo4j."""
         logger.info("Storing schema in Neo4j")
@@ -298,13 +520,13 @@ class SchemaIntrospector:
             table_name = table_data['table_name']
             columns = table_data['columns']
             
-            # Check table name similarity
+            # Check table name similarity (case-insensitive)
             max_table_score = 0
             for word in query_words:
                 score = fuzz.ratio(word.lower(), table_name.lower()) / 100.0
                 max_table_score = max(max_table_score, score)
             
-            # Check column name similarity
+            # Check column name similarity (case-insensitive)
             relevant_columns = []
             for column in columns:
                 column_name = column['name']
@@ -379,6 +601,52 @@ class SchemaIntrospector:
         
         logger.info(f"Schema context retrieved for {len(result)} tables")
         return schema_context
+    
+    async def get_inferred_relationships(self) -> List[Dict[str, Any]]:
+        """Get all inferred foreign key relationships from Neo4j."""
+        cypher_query = """
+        MATCH (source:SchemaNode)-[r:RELATIONSHIP {type: 'HAS_FOREIGN_KEY'}]->(target:SchemaNode)
+        WHERE r.properties.inferred = true
+        MATCH (source_table:SchemaNode)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(source)
+        MATCH (target_table:SchemaNode)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(target)
+        RETURN {
+            source_table: source_table.name,
+            source_column: source.name,
+            target_table: target_table.name,
+            target_column: target.name,
+            confidence: r.properties.confidence,
+            pattern_used: r.properties.pattern_used,
+            constraint_name: r.properties.constraint_name
+        } as relationship
+        ORDER BY relationship.confidence DESC
+        """
+        
+        results = await self.neo4j.query(cypher_query)
+        return [result['relationship'] for result in results]
+    
+    async def validate_inferred_relationships(self) -> Dict[str, Any]:
+        """Validate and provide statistics on inferred relationships."""
+        inferred_rels = await self.get_inferred_relationships()
+        
+        stats = {
+            "total_inferred": len(inferred_rels),
+            "high_confidence": len([r for r in inferred_rels if r['confidence'] >= 0.9]),
+            "medium_confidence": len([r for r in inferred_rels if 0.7 <= r['confidence'] < 0.9]),
+            "low_confidence": len([r for r in inferred_rels if r['confidence'] < 0.7]),
+            "by_pattern": {}
+        }
+        
+        # Count by pattern
+        for rel in inferred_rels:
+            pattern = rel['pattern_used']
+            if pattern not in stats["by_pattern"]:
+                stats["by_pattern"][pattern] = 0
+            stats["by_pattern"][pattern] += 1
+        
+        return {
+            "statistics": stats,
+            "relationships": inferred_rels
+        }
 
 
 # Global instance
