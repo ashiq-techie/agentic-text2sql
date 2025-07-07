@@ -1,5 +1,8 @@
 """
-FastAPI application for the text-to-SQL agent.
+FastAPI application for the text-to-SQL agent with Python A2A SDK integration.
+
+Combines our existing FastAPI endpoints with the official Python A2A SDK
+for standardized agent communication.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -9,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
+import asyncio
 
 from config import settings
 from schemas import (
@@ -18,12 +22,11 @@ from schemas import (
 from clients import initialize_clients, shutdown_clients, health_check_all
 from agent import process_chat_request, agent_health_check
 from schema_introspection import schema_introspector
-from a2a_schemas import (
-    AgentCard, TaskSendRequest, TaskSendResponse, TaskGetResponse,
-    TaskSubscribeRequest, TaskInput, create_user_message
-)
-from agent_card import AGENT_CARD
-from a2a_task_manager import task_manager
+
+# Python A2A SDK imports
+from python_a2a import A2AClient, Message, TextContent, MessageRole, FunctionCallContent, FunctionParameter
+from a2a_agent_server import text_to_sql_agent
+from a2a_agent_card_sdk import AGENT_CARD_SDK
 
 # Configure logging
 logging.basicConfig(
@@ -36,14 +39,14 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    logger.info("Starting text-to-SQL agent application")
+    logger.info("Starting text-to-SQL agent application with A2A SDK")
     
     try:
         # Initialize database clients
         await initialize_clients()
         
-        # Initialize A2A task manager
-        await task_manager.initialize()
+        # Initialize A2A agent
+        await text_to_sql_agent.initialize()
         
         logger.info("Application startup complete")
         yield
@@ -60,9 +63,9 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Text-to-SQL Agent",
-    description="Advanced text-to-SQL agent using Neo4j knowledge graph and LangGraph",
-    version="1.0.0",
+    title="Text-to-SQL Agent with A2A SDK",
+    description="Advanced text-to-SQL agent using Neo4j knowledge graph, LangGraph, and Python A2A SDK",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -80,10 +83,12 @@ app.add_middleware(
 async def root():
     """Root endpoint."""
     return {
-        "message": "Text-to-SQL Agent API",
-        "version": "1.0.0",
+        "message": "Text-to-SQL Agent API with A2A SDK",
+        "version": "2.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "a2a_agent_card": "/a2a/agent-card",
+        "a2a_message": "/a2a/message"
     }
 
 
@@ -97,17 +102,21 @@ async def health_check():
         # Check agent health
         agent_healthy = await agent_health_check()
         
+        # Check A2A agent health
+        a2a_healthy = text_to_sql_agent._initialized
+        
         # Overall health status
         all_healthy = (
             all(status == "healthy" for status in db_health.values()) and
-            agent_healthy
+            agent_healthy and a2a_healthy
         )
         
         return HealthResponse(
             status="healthy" if all_healthy else "unhealthy",
             dependencies={
                 **db_health,
-                "agent": "healthy" if agent_healthy else "unhealthy"
+                "agent": "healthy" if agent_healthy else "unhealthy",
+                "a2a_agent": "healthy" if a2a_healthy else "unhealthy"
             }
         )
         
@@ -122,9 +131,10 @@ async def health_check():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    Main chat endpoint for text-to-SQL conversion.
+    Original chat endpoint for direct text-to-SQL conversion.
     
-    Accepts a list of chat messages and returns the agent's response with SQL query results.
+    This endpoint maintains backward compatibility with existing clients.
+    For A2A protocol communication, use the /a2a/message endpoint.
     """
     try:
         start_time = time.time()
@@ -288,9 +298,7 @@ async def get_inferred_relationships_endpoint():
 
 @app.get("/metrics")
 async def get_metrics():
-    """
-    Endpoint to get basic application metrics.
-    """
+    """Endpoint to get basic application metrics."""
     try:
         # Get database health
         db_health = await health_check_all()
@@ -301,8 +309,9 @@ async def get_metrics():
         return {
             "database_health": db_health,
             "agent_health": "healthy" if agent_healthy else "unhealthy",
-            "uptime": "running",  # Could be enhanced with actual uptime
-            "version": "1.0.0"
+            "a2a_agent_health": "healthy" if text_to_sql_agent._initialized else "unhealthy",
+            "uptime": "running",
+            "version": "2.0.0"
         }
         
     except Exception as e:
@@ -310,110 +319,115 @@ async def get_metrics():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# A2A Protocol Endpoints
-@app.get("/agent-card", response_model=AgentCard)
-async def get_agent_card():
+# ========================================
+# PYTHON A2A SDK ENDPOINTS
+# ========================================
+
+@app.get("/a2a/agent-card")
+async def get_a2a_agent_card():
     """
-    A2A Protocol: Get agent card describing capabilities.
+    A2A SDK: Get agent card describing capabilities.
     
-    Returns the agent card that describes what this agent can do
-    and how other agents can interact with it.
+    Returns the agent card using the Python A2A SDK format.
     """
-    return AGENT_CARD
+    return AGENT_CARD_SDK
 
 
-@app.post("/tasks/send", response_model=TaskSendResponse)
-async def send_task(request: TaskSendRequest):
+@app.post("/a2a/message")
+async def send_a2a_message(message_data: Dict[str, Any]):
     """
-    A2A Protocol: Send a task to the agent for execution.
+    A2A SDK: Send a message to the agent using Python A2A SDK format.
     
-    Creates a new task and executes it synchronously.
+    This endpoint accepts messages in the Python A2A SDK format and
+    returns responses in the same format.
     """
     try:
-        logger.info("Received A2A task send request")
+        logger.info("Received A2A SDK message")
         
-        # Create task
-        task = await task_manager.create_task(
-            task_input=request.input,
-            metadata=request.metadata
-        )
+        # Parse the message using Python A2A SDK
+        if message_data.get("content", {}).get("type") == "text":
+            message = Message(
+                content=TextContent(text=message_data["content"]["text"]),
+                role=MessageRole.USER,
+                message_id=message_data.get("message_id"),
+                conversation_id=message_data.get("conversation_id")
+            )
+        elif message_data.get("content", {}).get("type") == "function_call":
+            # Handle function calls
+            function_data = message_data["content"]
+            parameters = [
+                FunctionParameter(name=k, value=v) 
+                for k, v in function_data.get("parameters", {}).items()
+            ]
+            
+            message = Message(
+                content=FunctionCallContent(
+                    name=function_data["name"],
+                    parameters=parameters
+                ),
+                role=MessageRole.USER,
+                message_id=message_data.get("message_id"),
+                conversation_id=message_data.get("conversation_id")
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported message content type")
         
-        # Execute task synchronously
-        completed_task = await task_manager.execute_task(task.id)
+        # Process the message through our A2A agent
+        response = text_to_sql_agent.handle_message(message)
         
-        return TaskSendResponse(
-            task_id=completed_task.id,
-            status=completed_task.state.status
-        )
+        # Return the response in A2A SDK format
+        return {
+            "message_id": response.message_id,
+            "conversation_id": response.conversation_id,
+            "parent_message_id": response.parent_message_id,
+            "role": response.role.value,
+            "content": response.content.__dict__,
+            "timestamp": response.timestamp.isoformat() if response.timestamp else None
+        }
         
     except Exception as e:
-        logger.error(f"A2A task send failed: {e}")
+        logger.error(f"A2A SDK message failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/tasks/{task_id}", response_model=TaskGetResponse)
-async def get_task(task_id: str):
+@app.post("/a2a/function-call")
+async def call_a2a_function(function_data: Dict[str, Any]):
     """
-    A2A Protocol: Get task status and results.
+    A2A SDK: Call a specific function on the agent.
     
-    Returns the current status and results of a task.
+    This is a convenience endpoint for making function calls directly.
     """
     try:
-        task = task_manager.get_task(task_id)
+        function_name = function_data.get("function_name")
+        parameters = function_data.get("parameters", {})
         
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
+        logger.info(f"Received A2A function call: {function_name}")
         
-        return TaskGetResponse(task=task)
+        # Create function call message
+        param_objects = [
+            FunctionParameter(name=k, value=v) 
+            for k, v in parameters.items()
+        ]
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"A2A task get failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/tasks/sendSubscribe")
-async def send_task_subscribe(request: TaskSubscribeRequest):
-    """
-    A2A Protocol: Send a task with streaming updates.
-    
-    Creates a new task and streams progress updates via Server-Sent Events.
-    """
-    try:
-        logger.info("Received A2A task subscribe request")
-        
-        # Create task
-        task = await task_manager.create_task(
-            task_input=request.input,
-            metadata=request.metadata
+        message = Message(
+            content=FunctionCallContent(
+                name=function_name,
+                parameters=param_objects
+            ),
+            role=MessageRole.USER
         )
         
-        # Return streaming response
-        from sse_starlette import EventSourceResponse
-        import json
+        # Process through A2A agent
+        response = text_to_sql_agent.handle_message(message)
         
-        async def event_stream():
-            try:
-                async for event in task_manager.execute_task_streaming(task.id):
-                    yield {
-                        "event": event["event"],
-                        "data": json.dumps(event["data"])
-                    }
-            except Exception as e:
-                logger.error(f"Streaming task failed: {e}")
-                yield {
-                    "event": "task_error",
-                    "data": json.dumps({
-                        "task_id": task.id,
-                        "error": str(e)
-                    })
-                }
-        
-        return EventSourceResponse(event_stream())
+        # Return just the function response data
+        if hasattr(response.content, 'response'):
+            return response.content.response
+        else:
+            return {"text": response.content.text}
         
     except Exception as e:
-        logger.error(f"A2A task subscribe failed: {e}")
+        logger.error(f"A2A function call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
