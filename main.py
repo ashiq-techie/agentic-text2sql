@@ -18,6 +18,12 @@ from schemas import (
 from clients import initialize_clients, shutdown_clients, health_check_all
 from agent import process_chat_request, agent_health_check
 from schema_introspection import schema_introspector
+from a2a_schemas import (
+    AgentCard, TaskSendRequest, TaskSendResponse, TaskGetResponse,
+    TaskSubscribeRequest, TaskInput, create_user_message
+)
+from agent_card import AGENT_CARD
+from a2a_task_manager import task_manager
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +41,9 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize database clients
         await initialize_clients()
+        
+        # Initialize A2A task manager
+        await task_manager.initialize()
         
         logger.info("Application startup complete")
         yield
@@ -298,6 +307,113 @@ async def get_metrics():
         
     except Exception as e:
         logger.error(f"Metrics endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# A2A Protocol Endpoints
+@app.get("/agent-card", response_model=AgentCard)
+async def get_agent_card():
+    """
+    A2A Protocol: Get agent card describing capabilities.
+    
+    Returns the agent card that describes what this agent can do
+    and how other agents can interact with it.
+    """
+    return AGENT_CARD
+
+
+@app.post("/tasks/send", response_model=TaskSendResponse)
+async def send_task(request: TaskSendRequest):
+    """
+    A2A Protocol: Send a task to the agent for execution.
+    
+    Creates a new task and executes it synchronously.
+    """
+    try:
+        logger.info("Received A2A task send request")
+        
+        # Create task
+        task = await task_manager.create_task(
+            task_input=request.input,
+            metadata=request.metadata
+        )
+        
+        # Execute task synchronously
+        completed_task = await task_manager.execute_task(task.id)
+        
+        return TaskSendResponse(
+            task_id=completed_task.id,
+            status=completed_task.state.status
+        )
+        
+    except Exception as e:
+        logger.error(f"A2A task send failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tasks/{task_id}", response_model=TaskGetResponse)
+async def get_task(task_id: str):
+    """
+    A2A Protocol: Get task status and results.
+    
+    Returns the current status and results of a task.
+    """
+    try:
+        task = task_manager.get_task(task_id)
+        
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        return TaskGetResponse(task=task)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"A2A task get failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tasks/sendSubscribe")
+async def send_task_subscribe(request: TaskSubscribeRequest):
+    """
+    A2A Protocol: Send a task with streaming updates.
+    
+    Creates a new task and streams progress updates via Server-Sent Events.
+    """
+    try:
+        logger.info("Received A2A task subscribe request")
+        
+        # Create task
+        task = await task_manager.create_task(
+            task_input=request.input,
+            metadata=request.metadata
+        )
+        
+        # Return streaming response
+        from sse_starlette import EventSourceResponse
+        import json
+        
+        async def event_stream():
+            try:
+                async for event in task_manager.execute_task_streaming(task.id):
+                    yield {
+                        "event": event["event"],
+                        "data": json.dumps(event["data"])
+                    }
+            except Exception as e:
+                logger.error(f"Streaming task failed: {e}")
+                yield {
+                    "event": "task_error",
+                    "data": json.dumps({
+                        "task_id": task.id,
+                        "error": str(e)
+                    })
+                }
+        
+        return EventSourceResponse(event_stream())
+        
+    except Exception as e:
+        logger.error(f"A2A task subscribe failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
