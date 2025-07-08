@@ -316,8 +316,8 @@ class SchemaIntrospector:
                         # Extract the potential table reference from column name
                         potential_table_refs = self._extract_table_references(column_name, pattern)
                         
-                                                 # Find matching tables using fuzzy matching
-                         for ref in potential_table_refs:
+                        # Find matching tables using fuzzy matching
+                        for ref in potential_table_refs:
                              matched_table = self._find_matching_table(ref, table_names, settings.fk_inference_similarity_threshold)
                              if matched_table and matched_table != table_name:
                                 # Find the primary key column of the matched table
@@ -497,56 +497,63 @@ class SchemaIntrospector:
             for node in schema.nodes:
                 if node.type == "database":
                     node.properties["introspection_timestamp"] = datetime.datetime.utcnow().isoformat()
-        
-        # Create nodes
-        for node in schema.nodes:
-            query = """
-            CREATE (n:SchemaNode {
-                id: $id,
-                type: $type,
-                name: $name,
-                properties: $properties
-            })
-            """
-            await self.neo4j.query(query, {
-                "id": node.id,
-                "type": node.type,
-                "name": node.name,
-                "properties": node.properties
-            })
-        
-        # Create relationships
-        for rel in schema.relationships:
-            query = """
-            MATCH (source {id: $source_id})
-            MATCH (target {id: $target_id})
-            CREATE (source)-[r:RELATIONSHIP {
-                type: $type,
-                properties: $properties
-            }]->(target)
-            """
-            await self.neo4j.query(query, {
-                "source_id": rel.source_id,
-                "target_id": rel.target_id,
-                "type": rel.type,
-                "properties": rel.properties
-            })
-        
-        logger.info(f"Schema stored in Neo4j: {len(schema.nodes)} nodes, {len(schema.relationships)} relationships")
+            
+            # Create nodes
+            for node in schema.nodes:
+                query = """
+                CREATE (n:SchemaNode {
+                    id: $id,
+                    type: $type,
+                    name: $name,
+                    properties: $properties
+                })
+                """
+                await self.neo4j.query(query, {
+                    "id": node.id,
+                    "type": node.type,
+                    "name": node.name,
+                    "properties": node.properties
+                })
+            
+            # Create relationships
+            for rel in schema.relationships:
+                query = """
+                MATCH (source {id: $source_id})
+                MATCH (target {id: $target_id})
+                CREATE (source)-[r:RELATIONSHIP {
+                    type: $type,
+                    properties: $properties
+                }]->(target)
+                """
+                await self.neo4j.query(query, {
+                    "source_id": rel.source_id,
+                    "target_id": rel.target_id,
+                    "type": rel.type,
+                    "properties": rel.properties
+                })
+            
+            logger.info(f"Schema stored in Neo4j: {len(schema.nodes)} nodes, {len(schema.relationships)} relationships")
+            
+        except Exception as e:
+            logger.error(f"Failed to store schema in Neo4j: {e}")
+            raise
     
-    async def find_relevant_schema(self, query_text: str, similarity_threshold: float = 0.6) -> List[Dict[str, Any]]:
+    async def find_relevant_schema(self, query_text: str, similarity_threshold: float = 0.6, database_name: str = None) -> List[Dict[str, Any]]:
         """Find relevant tables and columns based on query text using fuzzy matching."""
-        logger.info(f"Finding relevant schema for query: {query_text}")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Finding relevant schema for query: {query_text} in database: {database_name}")
         
-        # Get all tables and columns from Neo4j
+        # Get all tables and columns from Neo4j for the specified database
         cypher_query = """
-        MATCH (db:SchemaNode {type: 'database'})-[:RELATIONSHIP {type: 'HAS_TABLE'}]->(table:SchemaNode {type: 'table'})
+        MATCH (db:SchemaNode {type: 'database', name: $database_name})-[:RELATIONSHIP {type: 'HAS_TABLE'}]->(table:SchemaNode {type: 'table'})
         MATCH (table)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(column:SchemaNode {type: 'column'})
         RETURN table.name as table_name, 
                collect({name: column.name, properties: column.properties}) as columns
         """
         
-        schema_data = await self.neo4j.query(cypher_query)
+        schema_data = await self.neo4j.query(cypher_query, {"database_name": database_name})
         
         relevant_tables = []
         query_words = query_text.lower().split()
@@ -592,17 +599,21 @@ class SchemaIntrospector:
         logger.info(f"Found {len(relevant_tables)} relevant tables")
         return relevant_tables
     
-    async def get_schema_context(self, table_names: List[str]) -> Dict[str, Any]:
+    async def get_schema_context(self, table_names: List[str], database_name: str = None) -> Dict[str, Any]:
         """Get complete schema context for specified tables including relationships."""
-        logger.info(f"Getting schema context for tables: {table_names}")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Getting schema context for tables: {table_names} in database: {database_name}")
         
-        # Get tables, columns, and relationships
+        # Get tables, columns, and relationships for the specified database
         cypher_query = """
-        MATCH (table:SchemaNode {type: 'table'})
+        MATCH (db:SchemaNode {type: 'database', name: $database_name})-[:RELATIONSHIP {type: 'HAS_TABLE'}]->(table:SchemaNode {type: 'table'})
         WHERE table.name IN $table_names
         MATCH (table)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(column:SchemaNode {type: 'column'})
         OPTIONAL MATCH (column)-[fk:RELATIONSHIP {type: 'HAS_FOREIGN_KEY'}]->(ref_column:SchemaNode {type: 'column'})
         OPTIONAL MATCH (ref_column)<-[:RELATIONSHIP {type: 'HAS_COLUMN'}]-(ref_table:SchemaNode {type: 'table'})
+        WHERE ref_table.properties.database = $database_name
         RETURN table.name as table_name,
                collect(DISTINCT {
                    name: column.name,
@@ -615,9 +626,13 @@ class SchemaIntrospector:
                }) as columns
         """
         
-        result = await self.neo4j.query(cypher_query, {"table_names": table_names})
+        result = await self.neo4j.query(cypher_query, {
+            "table_names": table_names,
+            "database_name": database_name
+        })
         
         schema_context = {
+            "database_name": database_name,
             "tables": result,
             "relationships": []
         }
@@ -634,16 +649,21 @@ class SchemaIntrospector:
                             "to_column": fk['ref_column']
                         })
         
-        logger.info(f"Schema context retrieved for {len(result)} tables")
+        logger.info(f"Schema context retrieved for {len(result)} tables in database: {database_name}")
         return schema_context
     
-    async def get_inferred_relationships(self) -> List[Dict[str, Any]]:
+    async def get_inferred_relationships(self, database_name: str = None) -> List[Dict[str, Any]]:
         """Get all inferred foreign key relationships from Neo4j."""
+        if database_name is None:
+            database_name = settings.default_database_name
+            
         cypher_query = """
-        MATCH (source:SchemaNode)-[r:RELATIONSHIP {type: 'HAS_FOREIGN_KEY'}]->(target:SchemaNode)
+        MATCH (db:SchemaNode {type: 'database', name: $database_name})-[:RELATIONSHIP {type: 'HAS_TABLE'}]->(source_table:SchemaNode {type: 'table'})
+        MATCH (source_table)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(source:SchemaNode)
+        MATCH (source)-[r:RELATIONSHIP {type: 'HAS_FOREIGN_KEY'}]->(target:SchemaNode)
         WHERE r.properties.inferred = true
-        MATCH (source_table:SchemaNode)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(source)
         MATCH (target_table:SchemaNode)-[:RELATIONSHIP {type: 'HAS_COLUMN'}]->(target)
+        WHERE target_table.properties.database = $database_name
         RETURN {
             source_table: source_table.name,
             source_column: source.name,
@@ -656,12 +676,15 @@ class SchemaIntrospector:
         ORDER BY relationship.confidence DESC
         """
         
-        results = await self.neo4j.query(cypher_query)
+        results = await self.neo4j.query(cypher_query, {"database_name": database_name})
         return [result['relationship'] for result in results]
     
-    async def validate_inferred_relationships(self) -> Dict[str, Any]:
+    async def validate_inferred_relationships(self, database_name: str = None) -> Dict[str, Any]:
         """Validate and provide statistics on inferred relationships."""
-        inferred_rels = await self.get_inferred_relationships()
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        inferred_rels = await self.get_inferred_relationships(database_name)
         
         stats = {
             "total_inferred": len(inferred_rels),
@@ -679,6 +702,7 @@ class SchemaIntrospector:
             stats["by_pattern"][pattern] += 1
         
         return {
+            "database_name": database_name,
             "statistics": stats,
             "relationships": inferred_rels
         }

@@ -38,4 +38,6 @@ MAX_RESULTS_LIMIT=1000
 
 # Schema Inference Configuration
 ENABLE_FK_INFERENCE=true
-FK_INFERENCE_SIMILARITY_THRESHOLD=0.7 
+FK_INFERENCE_SIMILARITY_THRESHOLD=0.7
+
+# A2A Configuration (integrated with main service on port 8000) 

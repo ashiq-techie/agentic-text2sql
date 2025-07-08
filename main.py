@@ -23,10 +23,8 @@ from clients import initialize_clients, shutdown_clients, health_check_all
 from agent import process_chat_request, agent_health_check
 from schema_introspection import schema_introspector
 
-# Python A2A SDK imports
-from python_a2a import A2AClient, Message, TextContent, MessageRole, FunctionCallContent, FunctionParameter
-from a2a_agent_server import text_to_sql_agent
-from a2a_agent_card_sdk import AGENT_CARD_SDK
+# A2A SDK imports
+from a2a_agent_executor import get_agent_executor, health_check as a2a_health_check
 
 # Configure logging
 logging.basicConfig(
@@ -38,34 +36,39 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    logger.info("Starting text-to-SQL agent application with A2A SDK")
-    
+    """Lifespan context manager for FastAPI application startup and shutdown."""
+    # Startup
+    logger.info("Starting up the application...")
     try:
-        # Initialize database clients
         await initialize_clients()
+        logger.info("Database clients initialized successfully")
         
-        # Initialize A2A agent
-        await text_to_sql_agent.initialize()
+        # Initialize A2A service
+        executor = get_agent_executor()
+        if executor:
+            # Don't start the A2A server here as it runs on a different port
+            # Just ensure the service is ready
+            logger.info("A2A service initialized and ready")
+        else:
+            logger.warning("A2A service not available")
         
-        logger.info("Application startup complete")
         yield
         
     except Exception as e:
-        logger.error(f"Startup failed: {e}")
+        logger.error(f"Failed to start application: {e}")
         raise
-    
     finally:
-        # Cleanup
-        logger.info("Shutting down application")
+        # Shutdown
+        logger.info("Shutting down the application...")
         await shutdown_clients()
+        logger.info("Application shutdown complete")
 
 
 # Create FastAPI app
 app = FastAPI(
     title="Text-to-SQL Agent with A2A SDK",
-    description="Advanced text-to-SQL agent using Neo4j knowledge graph, LangGraph, and Python A2A SDK",
-    version="2.0.0",
+    description="Unified text-to-SQL agent with Neo4j knowledge graph, multi-database support, Oracle thick client with Kerberos, and integrated A2A protocol",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -83,12 +86,15 @@ app.add_middleware(
 async def root():
     """Root endpoint."""
     return {
-        "message": "Text-to-SQL Agent API with A2A SDK",
-        "version": "2.0.0",
+        "message": "Unified Text-to-SQL Agent API with integrated A2A SDK",
+        "version": "2.1.0",
         "docs": "/docs",
         "health": "/health",
         "a2a_agent_card": "/a2a/agent-card",
-        "a2a_message": "/a2a/message"
+        "a2a_message": "/a2a/message",
+        "a2a_stream": "/a2a/stream",
+        "a2a_task_status": "/a2a/task/{task_id}",
+        "a2a_service_status": "/a2a/status"
     }
 
 
@@ -103,21 +109,24 @@ async def health_check():
         agent_healthy = await agent_health_check()
         
         # Check A2A agent health
-        a2a_healthy = text_to_sql_agent._initialized
+        a2a_healthy = await a2a_health_check()
         
         # Overall health status
         all_healthy = (
             all(status == "healthy" for status in db_health.values()) and
-            agent_healthy and a2a_healthy
+            agent_healthy and
+            a2a_healthy
         )
+        
+        health_deps = {
+            **db_health,
+            "agent": "healthy" if agent_healthy else "unhealthy",
+            "a2a_agent": "healthy" if a2a_healthy else "unhealthy"
+        }
         
         return HealthResponse(
             status="healthy" if all_healthy else "unhealthy",
-            dependencies={
-                **db_health,
-                "agent": "healthy" if agent_healthy else "unhealthy",
-                "a2a_agent": "healthy" if a2a_healthy else "unhealthy"
-            }
+            dependencies=health_deps
         )
         
     except Exception as e:
@@ -230,7 +239,8 @@ async def _introspect_and_store_schema(schema_name: str = None, database_name: s
 @app.get("/schema/search")
 async def search_schema_endpoint(
     query: str,
-    similarity_threshold: float = 0.6
+    similarity_threshold: float = 0.6,
+    database_name: str = None
 ):
     """
     Endpoint to search for relevant schema based on query terms.
@@ -238,15 +248,19 @@ async def search_schema_endpoint(
     Useful for exploring what tables and columns are available for a given query.
     """
     try:
-        logger.info(f"Searching schema for: {query}")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Searching schema for: {query} in database: {database_name}")
         
         results = await schema_introspector.find_relevant_schema(
-            query, similarity_threshold
+            query, similarity_threshold, database_name
         )
         
         return {
             "query": query,
             "similarity_threshold": similarity_threshold,
+            "database_name": database_name,
             "results": results,
             "count": len(results)
         }
@@ -257,22 +271,30 @@ async def search_schema_endpoint(
 
 
 @app.get("/schema/context")
-async def get_schema_context_endpoint(table_names: str):
+async def get_schema_context_endpoint(
+    table_names: str,
+    database_name: str = None
+):
     """
     Endpoint to get complete schema context for specific tables.
     
     Args:
         table_names: Comma-separated list of table names
+        database_name: Target database name (optional)
     """
     try:
-        logger.info(f"Getting schema context for tables: {table_names}")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Getting schema context for tables: {table_names} in database: {database_name}")
         
         table_list = [name.strip().upper() for name in table_names.split(',')]
         
-        context = await schema_introspector.get_schema_context(table_list)
+        context = await schema_introspector.get_schema_context(table_list, database_name)
         
         return {
             "table_names": table_list,
+            "database_name": database_name,
             "context": context
         }
         
@@ -282,20 +304,27 @@ async def get_schema_context_endpoint(table_names: str):
 
 
 @app.get("/schema/inferred-relationships")
-async def get_inferred_relationships_endpoint():
+async def get_inferred_relationships_endpoint(database_name: str = None):
     """
     Endpoint to get all inferred foreign key relationships.
     
     Returns relationships that were inferred from naming conventions
     along with confidence scores and statistics.
+    
+    Args:
+        database_name: Target database name (optional)
     """
     try:
-        logger.info("Getting inferred foreign key relationships")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Getting inferred foreign key relationships for database: {database_name}")
         
-        validation_results = await schema_introspector.validate_inferred_relationships()
+        validation_results = await schema_introspector.validate_inferred_relationships(database_name)
         
         return {
             "message": "Inferred foreign key relationships retrieved successfully",
+            "database_name": database_name,
             "inference_enabled": settings.enable_fk_inference,
             "similarity_threshold": settings.fk_inference_similarity_threshold,
             **validation_results
@@ -316,13 +345,20 @@ async def get_metrics():
         # Get agent health
         agent_healthy = await agent_health_check()
         
-        return {
+        metrics = {
             "database_health": db_health,
             "agent_health": "healthy" if agent_healthy else "unhealthy",
-            "a2a_agent_health": "healthy" if text_to_sql_agent._initialized else "unhealthy",
             "uptime": "running",
-            "version": "2.0.0"
+            "version": "2.1.0"
         }
+        
+        # Add A2A metrics
+        a2a_healthy = await a2a_health_check()
+        agent_executor = get_agent_executor()
+        metrics["a2a_agent_health"] = "healthy" if a2a_healthy else "unhealthy"
+        metrics["a2a_active_tasks"] = len(agent_executor.tasks) if agent_executor else 0
+        
+        return metrics
         
     except Exception as e:
         logger.error(f"Metrics endpoint failed: {e}")
@@ -330,115 +366,143 @@ async def get_metrics():
 
 
 # ========================================
-# PYTHON A2A SDK ENDPOINTS
+# A2A SDK ENDPOINTS
 # ========================================
 
 @app.get("/a2a/agent-card")
 async def get_a2a_agent_card():
     """
-    A2A SDK: Get agent card describing capabilities.
+    Get the A2A agent card describing capabilities.
     
-    Returns the agent card using the Python A2A SDK format.
+    Returns the agent card using the official A2A SDK format.
     """
-    return AGENT_CARD_SDK
+    try:
+        agent_executor = get_agent_executor()
+        if not agent_executor:
+            raise HTTPException(status_code=500, detail="Agent executor not available")
+        
+        capabilities = agent_executor.get_capabilities()
+        return capabilities
+        
+    except Exception as e:
+        logger.error(f"Failed to get agent card: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/a2a/message")
-async def send_a2a_message(message_data: Dict[str, Any]):
+async def send_a2a_message(request: Dict[str, Any]):
     """
-    A2A SDK: Send a message to the agent using Python A2A SDK format.
+    Send a message to the A2A agent.
     
-    This endpoint accepts messages in the Python A2A SDK format and
+    This endpoint accepts messages in the A2A format and
     returns responses in the same format.
     """
     try:
-        logger.info("Received A2A SDK message")
+        agent_executor = get_agent_executor()
+        if not agent_executor:
+            raise HTTPException(status_code=500, detail="Agent executor not available")
         
-        # Parse the message using Python A2A SDK
-        if message_data.get("content", {}).get("type") == "text":
-            message = Message(
-                content=TextContent(text=message_data["content"]["text"]),
-                role=MessageRole.USER,
-                message_id=message_data.get("message_id"),
-                conversation_id=message_data.get("conversation_id")
-            )
-        elif message_data.get("content", {}).get("type") == "function_call":
-            # Handle function calls
-            function_data = message_data["content"]
-            parameters = [
-                FunctionParameter(name=k, value=v) 
-                for k, v in function_data.get("parameters", {}).items()
-            ]
-            
-            message = Message(
-                content=FunctionCallContent(
-                    name=function_data["name"],
-                    parameters=parameters
-                ),
-                role=MessageRole.USER,
-                message_id=message_data.get("message_id"),
-                conversation_id=message_data.get("conversation_id")
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported message content type")
+        logger.info("Received A2A message request")
         
-        # Process the message through our A2A agent
-        response = text_to_sql_agent.handle_message(message)
+        # Create a TaskRequest from the incoming request
+        # This is a simplified version - in real implementation,
+        # you would use the actual A2A SDK classes
+        task_request = type('TaskRequest', (), {
+            'message': type('Message', (), {
+                'parts': [
+                    type('Part', (), {
+                        'type': 'text',
+                        'text': request.get('message', '')
+                    })()
+                ]
+            })()
+        })()
         
-        # Return the response in A2A SDK format
+        # Process the request
+        response = await agent_executor.invoke(task_request)
+        
+        # Return the response in A2A format
         return {
-            "message_id": response.message_id,
-            "conversation_id": response.conversation_id,
-            "parent_message_id": response.parent_message_id,
-            "role": response.role.value,
-            "content": response.content.__dict__,
-            "timestamp": response.timestamp.isoformat() if response.timestamp else None
+            "task_id": response.task_id,
+            "status": response.status,
+            "message": {
+                "message_id": response.message.message_id,
+                "parts": [
+                    {
+                        "type": part.type,
+                        "text": getattr(part, 'text', None),
+                        "name": getattr(part, 'name', None),
+                        "result": getattr(part, 'result', None)
+                    }
+                    for part in response.message.parts
+                ],
+                "role": response.message.role,
+                "timestamp": response.message.timestamp
+            }
         }
         
     except Exception as e:
-        logger.error(f"A2A SDK message failed: {e}")
+        logger.error(f"A2A message failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/a2a/function-call")
-async def call_a2a_function(function_data: Dict[str, Any]):
+@app.get("/a2a/task/{task_id}")
+async def get_a2a_task_status(task_id: str):
     """
-    A2A SDK: Call a specific function on the agent.
-    
-    This is a convenience endpoint for making function calls directly.
+    Get the status of an A2A task.
     """
     try:
-        function_name = function_data.get("function_name")
-        parameters = function_data.get("parameters", {})
+        agent_executor = get_agent_executor()
+        if not agent_executor:
+            raise HTTPException(status_code=500, detail="Agent executor not available")
         
-        logger.info(f"Received A2A function call: {function_name}")
+        task_info = await agent_executor.get_task_status(task_id)
+        if not task_info:
+            raise HTTPException(status_code=404, detail="Task not found")
         
-        # Create function call message
-        param_objects = [
-            FunctionParameter(name=k, value=v) 
-            for k, v in parameters.items()
-        ]
+        return {
+            "task_id": task_info.task_id,
+            "status": task_info.status,
+            "created_at": task_info.created_at.isoformat(),
+            "updated_at": task_info.updated_at.isoformat(),
+            "error": task_info.error
+        }
         
-        message = Message(
-            content=FunctionCallContent(
-                name=function_name,
-                parameters=param_objects
-            ),
-            role=MessageRole.USER
-        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get task status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/a2a/status")
+async def get_a2a_service_status():
+    """
+    Get the status of the A2A service.
+    """
+    try:
+        agent_executor = get_agent_executor()
+        if not agent_executor:
+            return {
+                "available": False,
+                "message": "A2A agent executor not initialized"
+            }
         
-        # Process through A2A agent
-        response = text_to_sql_agent.handle_message(message)
+        is_healthy = agent_executor.initialized
         
-        # Return just the function response data
-        if hasattr(response.content, 'response'):
-            return response.content.response
-        else:
-            return {"text": response.content.text}
+        return {
+            "available": True,
+            "healthy": is_healthy,
+            "agent_initialized": agent_executor.initialized,
+            "active_tasks": len(agent_executor.tasks)
+        }
         
     except Exception as e:
-        logger.error(f"A2A function call failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to get A2A service status: {e}")
+        return {
+            "available": False,
+            "message": f"Error checking service status: {str(e)}"
+        }
 
 
 if __name__ == "__main__":

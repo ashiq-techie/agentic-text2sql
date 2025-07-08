@@ -1,16 +1,20 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.0
-neo4j==5.15.0
-oracledb==1.4.2
-langgraph==0.0.26
-langchain==0.1.0
-langchain-core==0.1.0
-langchain-openai==0.0.2
-python-dotenv==1.0.0
-asyncio-pool==0.6.0
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.23.0
-httpx==0.25.2
-sse-starlette==1.8.2
-python-a2a==0.3.3 
+fastapi
+uvicorn
+pydantic
+neo4j
+oracledb
+langgraph
+langchain
+langchain-core
+langchain-openai
+python-dotenv
+asyncio-pool
+fuzzywuzzy
+python-Levenshtein
+httpx
+pandas
+pyarrow
+sse-starlette
+a2a-sdk
+# A2A SDK - Install from Google's repository (see A2A_SDK_INSTALLATION.md)
+# pip install -e /path/to/A2A/a2a-python-sdk 
