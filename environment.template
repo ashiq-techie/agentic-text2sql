@@ -6,8 +6,22 @@ NEO4J_DATABASE=neo4j
 
 # Oracle Configuration
 ORACLE_DSN=localhost:1521/xe
-ORACLE_USERNAME=system
-ORACLE_PASSWORD=oracle
+ORACLE_USERNAME=hr
+ORACLE_PASSWORD=password
+
+# Oracle Thick Client Configuration (for Kerberos/advanced features)
+# Set to true to use thick client (required for Kerberos)
+ORACLE_USE_THICK_CLIENT=false
+# Path to Oracle client libraries (optional - uses default if not specified)
+ORACLE_LIB_DIR=/path/to/oracle/instantclient
+# Set to true to use Kerberos authentication (thick client required)
+ORACLE_USE_KERBEROS=false
+
+# Database Parameterization Configuration  
+# Default database name for schema introspection
+DEFAULT_DATABASE_NAME=oracle_main
+# Whether to support multiple databases in single Neo4j instance
+SUPPORT_MULTIPLE_DATABASES=true
 
 # OpenAI Configuration
 OPENAI_API_KEY=your_openai_api_key_here

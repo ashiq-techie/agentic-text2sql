@@ -19,19 +19,33 @@ class SchemaIntrospector:
         self.neo4j = neo4j_client
         self.oracle = oracle_client
     
-    async def introspect_oracle_schema(self, schema_name: Optional[str] = None) -> SchemaGraph:
+    async def introspect_oracle_schema(
+        self, 
+        schema_name: Optional[str] = None, 
+        database_name: Optional[str] = None
+    ) -> SchemaGraph:
         """Introspect Oracle database schema and return structured representation."""
-        logger.info(f"Starting schema introspection for schema: {schema_name or 'all'}")
+        # Use provided database name or default
+        if database_name is None:
+            database_name = settings.default_database_name
+        
+        logger.info(f"Starting schema introspection for database: {database_name}, schema: {schema_name or 'all'}")
         
         nodes = []
         relationships = []
         
-        # Get database information
+        # Get database information with parameterized name
+        database_id = f"database_{database_name}"
         db_node = SchemaNode(
-            id="database",
+            id=database_id,
             type="database",
-            name="oracle_db",
-            properties={"description": "Oracle Database"}
+            name=database_name,
+            properties={
+                "description": f"Oracle Database: {database_name}",
+                "database_type": "Oracle",
+                "schema_filter": schema_name or "all_schemas",
+                "introspection_timestamp": None  # Will be set during storage
+            }
         )
         nodes.append(db_node)
         
@@ -40,12 +54,13 @@ class SchemaIntrospector:
         table_nodes = []
         
         for table in tables:
-            table_id = f"table_{table['TABLE_NAME']}"
+            table_id = f"{database_name}_table_{table['TABLE_NAME']}"
             table_node = SchemaNode(
                 id=table_id,
                 type="table",
                 name=table['TABLE_NAME'],
                 properties={
+                    "database": database_name,
                     "schema": table['OWNER'],
                     "table_type": table.get('TABLE_TYPE', 'TABLE'),
                     "comments": table.get('COMMENTS', ''),
@@ -57,7 +72,7 @@ class SchemaIntrospector:
             
             # Add HAS_TABLE relationship
             relationships.append(SchemaRelationship(
-                source_id="database",
+                source_id=database_id,
                 target_id=table_id,
                 type="HAS_TABLE"
             ))
@@ -68,12 +83,13 @@ class SchemaIntrospector:
             columns = await self._get_columns(table_name, schema_name)
             
             for column in columns:
-                column_id = f"column_{table_name}_{column['COLUMN_NAME']}"
+                column_id = f"{database_name}_column_{table_name}_{column['COLUMN_NAME']}"
                 column_node = SchemaNode(
                     id=column_id,
                     type="column",
                     name=column['COLUMN_NAME'],
                     properties={
+                        "database": database_name,
                         "table": table_name,
                         "data_type": column['DATA_TYPE'],
                         "data_length": column.get('DATA_LENGTH', 0),
@@ -98,7 +114,7 @@ class SchemaIntrospector:
         # Get primary keys
         primary_keys = await self._get_primary_keys(schema_name)
         for pk in primary_keys:
-            column_id = f"column_{pk['TABLE_NAME']}_{pk['COLUMN_NAME']}"
+            column_id = f"{database_name}_column_{pk['TABLE_NAME']}_{pk['COLUMN_NAME']}"
             # Update the column node properties
             for node in nodes:
                 if node.id == column_id:
@@ -108,8 +124,8 @@ class SchemaIntrospector:
         # Get foreign keys
         foreign_keys = await self._get_foreign_keys(schema_name)
         for fk in foreign_keys:
-            source_column_id = f"column_{fk['TABLE_NAME']}_{fk['COLUMN_NAME']}"
-            target_column_id = f"column_{fk['R_TABLE_NAME']}_{fk['R_COLUMN_NAME']}"
+            source_column_id = f"{database_name}_column_{fk['TABLE_NAME']}_{fk['COLUMN_NAME']}"
+            target_column_id = f"{database_name}_column_{fk['R_TABLE_NAME']}_{fk['R_COLUMN_NAME']}"
             
             # Mark columns as foreign keys
             for node in nodes:
@@ -456,12 +472,31 @@ class SchemaIntrospector:
         
         return round(confidence, 2)
     
-    async def store_schema_in_neo4j(self, schema: SchemaGraph) -> None:
+    async def store_schema_in_neo4j(self, schema: SchemaGraph, database_name: Optional[str] = None) -> None:
         """Store the schema graph in Neo4j."""
-        logger.info("Storing schema in Neo4j")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Storing schema for database '{database_name}' in Neo4j")
         
-        # Clear existing schema
-        await self.neo4j.query("MATCH (n) DETACH DELETE n")
+        try:
+            # Clear existing schema for this specific database if multiple databases are not supported
+            if not settings.support_multiple_databases:
+                logger.info("Clearing all existing schema data (single database mode)")
+                await self.neo4j.query("MATCH (n) DETACH DELETE n")
+            else:
+                # Clear only this database's schema in multi-database mode
+                logger.info(f"Clearing existing schema for database '{database_name}' (multi-database mode)")
+                await self.neo4j.query(
+                    "MATCH (n) WHERE n.database = $database_name OR n.id STARTS WITH $db_prefix DETACH DELETE n",
+                    {"database_name": database_name, "db_prefix": f"database_{database_name}"}
+                )
+            
+            # Add timestamp to database node
+            import datetime
+            for node in schema.nodes:
+                if node.type == "database":
+                    node.properties["introspection_timestamp"] = datetime.datetime.utcnow().isoformat()
         
         # Create nodes
         for node in schema.nodes:

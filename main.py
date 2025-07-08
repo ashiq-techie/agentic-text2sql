@@ -173,24 +173,31 @@ async def chat_endpoint(request: ChatRequest):
 @app.post("/introspect-schema")
 async def introspect_schema_endpoint(
     background_tasks: BackgroundTasks,
-    schema_name: str = None
+    schema_name: str = None,
+    database_name: str = None
 ):
     """
     Endpoint to introspect Oracle database schema and store it in Neo4j.
     
     This is typically run once or periodically to update the knowledge graph.
+    Now supports multiple databases by specifying database_name parameter.
     """
     try:
-        logger.info(f"Starting schema introspection for schema: {schema_name}")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Starting schema introspection for database: {database_name}, schema: {schema_name}")
         
         # Run schema introspection in background
         background_tasks.add_task(
             _introspect_and_store_schema,
-            schema_name
+            schema_name,
+            database_name
         )
         
         return {
             "message": "Schema introspection started",
+            "database_name": database_name,
             "schema_name": schema_name,
             "status": "in_progress"
         }
@@ -200,21 +207,24 @@ async def introspect_schema_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _introspect_and_store_schema(schema_name: str = None):
+async def _introspect_and_store_schema(schema_name: str = None, database_name: str = None):
     """Background task to introspect and store schema."""
     try:
-        logger.info("Starting schema introspection background task")
+        if database_name is None:
+            database_name = settings.default_database_name
+            
+        logger.info(f"Starting schema introspection background task for database: {database_name}")
         
         # Introspect Oracle schema
-        schema_graph = await schema_introspector.introspect_oracle_schema(schema_name)
+        schema_graph = await schema_introspector.introspect_oracle_schema(schema_name, database_name)
         
         # Store in Neo4j
-        await schema_introspector.store_schema_in_neo4j(schema_graph)
+        await schema_introspector.store_schema_in_neo4j(schema_graph, database_name)
         
-        logger.info("Schema introspection completed successfully")
+        logger.info(f"Schema introspection completed successfully for database: {database_name}")
         
     except Exception as e:
-        logger.error(f"Schema introspection background task failed: {e}")
+        logger.error(f"Schema introspection background task failed for database: {database_name}: {e}")
 
 
 @app.get("/schema/search")

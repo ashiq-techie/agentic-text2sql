@@ -17,8 +17,17 @@ class Settings(BaseSettings):
     
     # Oracle Configuration
     oracle_dsn: str = Field(default="localhost:1521/xe", env="ORACLE_DSN")
-    oracle_username: str = Field(default="system", env="ORACLE_USERNAME")
-    oracle_password: str = Field(default="oracle", env="ORACLE_PASSWORD")
+    oracle_username: str = Field(default="hr", env="ORACLE_USERNAME")
+    oracle_password: str = Field(default="password", env="ORACLE_PASSWORD")
+    
+    # Oracle Thick Client Configuration
+    oracle_use_thick_client: bool = Field(default=False, env="ORACLE_USE_THICK_CLIENT")
+    oracle_lib_dir: Optional[str] = Field(default=None, env="ORACLE_LIB_DIR")
+    oracle_use_kerberos: bool = Field(default=False, env="ORACLE_USE_KERBEROS")
+    
+    # Database Parameterization Configuration
+    default_database_name: str = Field(default="oracle_main", env="DEFAULT_DATABASE_NAME")
+    support_multiple_databases: bool = Field(default=True, env="SUPPORT_MULTIPLE_DATABASES")
     
     # OpenAI Configuration
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")

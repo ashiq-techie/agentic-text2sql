@@ -124,20 +124,40 @@ class OracleClient:
     async def connect(self) -> None:
         """Establish connection pool to Oracle."""
         try:
-            # Initialize Oracle client in async mode
-            oracledb.init_oracle_client()
+            # Initialize Oracle client with thick client support if enabled
+            if settings.oracle_use_thick_client:
+                if settings.oracle_lib_dir:
+                    oracledb.init_oracle_client(lib_dir=settings.oracle_lib_dir)
+                    logger.info(f"Initialized Oracle thick client with lib_dir: {settings.oracle_lib_dir}")
+                else:
+                    oracledb.init_oracle_client()
+                    logger.info("Initialized Oracle thick client with default lib_dir")
+            else:
+                # Use thin client (default)
+                logger.info("Using Oracle thin client")
+            
+            # Configure connection parameters based on authentication method
+            pool_params = {
+                "dsn": self.dsn,
+                "min": 5,
+                "max": 20,
+                "increment": 5,
+                "threaded": True,
+                "getmode": oracledb.POOL_GETMODE_WAIT
+            }
+            
+            if settings.oracle_use_kerberos:
+                # Use external authentication (Kerberos)
+                # No username/password needed for Kerberos authentication
+                logger.info("Using Oracle Kerberos authentication")
+            else:
+                # Use username/password authentication
+                pool_params["user"] = self.username
+                pool_params["password"] = self.password
+                logger.info(f"Using Oracle username/password authentication for user: {self.username}")
             
             # Create connection pool
-            self.pool = oracledb.create_pool(
-                user=self.username,
-                password=self.password,
-                dsn=self.dsn,
-                min=5,
-                max=20,
-                increment=5,
-                threaded=True,
-                getmode=oracledb.POOL_GETMODE_WAIT
-            )
+            self.pool = oracledb.create_pool(**pool_params)
             
             logger.info("Connected to Oracle successfully")
         except Exception as e:
