@@ -496,7 +496,7 @@ class SchemaIntrospector:
             import datetime
             for node in schema.nodes:
                 if node.type == "database":
-                    node.properties["introspection_timestamp"] = datetime.datetime.utcnow().isoformat()
+                    node.properties["introspection_timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             
             # Create nodes
             for node in schema.nodes:

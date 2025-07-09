@@ -3,47 +3,27 @@ A2A Agent Executor for Text-to-SQL Agent
 
 This module implements the A2A agent executor following the official A2A SDK patterns,
 integrating with our existing text-to-SQL agent functionality.
-
-Based on the official A2A SDK example:
-https://github.com/a2aproject/a2a-samples/blob/main/samples/python/agents/langgraph/app/agent_executor.py
 """
 
 import asyncio
-import logging
-from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
 import json
+import logging
 import uuid
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-# A2A SDK imports - Required for A2A functionality
-from a2a.server.agent_execution import AgentExecutor, RequestContext
-from a2a.server.events import EventQueue
-from a2a.server.tasks import TaskUpdater
-from a2a.types import (
-    InternalError,
-    InvalidParamsError,
-    Part,
-    Task,
-    TaskState,
-    TextPart,
-    UnsupportedOperationError,
-)
-from a2a.utils import (
-    new_agent_text_message,
-    new_task,
-)
-from a2a.utils.errors import ServerError
+# A2A SDK imports
+from a2a.server.agent_execution import AgentExecutor
+from a2a.types import Task, TaskState, TextPart
+from a2a.utils import new_task
 
-# Import our existing text-to-SQL components
-from agent import process_chat_request
-from agent_tools import (
-    schema_search_tool,
-    get_schema_context_tool,
-    neo4j_query_tool,
-    oracle_query_tool
-)
-from schemas import ChatMessage, AgentResponse
+# LangChain imports
+from langchain_core.messages import HumanMessage
+
+# Local imports
+from agent import text2sql_agent
+from schemas import ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -62,205 +42,90 @@ class TaskInfo:
 
 class TextToSQLAgentExecutor(AgentExecutor):
     """
-    A2A Agent Executor for Text-to-SQL Agent
+    Streaming-Only A2A Agent Executor for Text-to-SQL Agent
     
-    This class implements the A2A AgentExecutor interface to provide
-    text-to-SQL capabilities through the A2A protocol.
+    Provides text-to-SQL capabilities through streaming responses with real-time
+    agent processing steps. Synchronous requests are disabled.
     """
     
     def __init__(self):
         super().__init__()
         self.name = "text-to-sql-agent"
-        self.version = "1.0.0"
-        self.description = "Text-to-SQL agent with schema introspection and query generation"
+        self.version = "2.0.0"
+        self.description = "Streaming-only text-to-SQL agent with real-time React processing steps, Neo4j schema introspection, and multi-format query generation. Synchronous invoke() method is deprecated - use stream() only."
         self.tasks: Dict[str, TaskInfo] = {}
-        self.initialized = False
-        
-        # Initialize the agent
-        self._initialize_agent()
+        self.initialized = self._initialize_agent()
     
-    def _initialize_agent(self):
+    def _initialize_agent(self) -> bool:
         """Initialize the text-to-SQL agent components"""
         try:
-            # Test if our agent components are available
             logger.info("Initializing text-to-SQL agent components...")
-            self.initialized = True
-            logger.info("Text-to-SQL agent initialized successfully")
+            # Test if our agent components are available
+            return True
         except Exception as e:
             logger.error(f"Failed to initialize text-to-SQL agent: {e}")
-            self.initialized = False
+            return False
     
     def get_capabilities(self) -> Dict[str, Any]:
-        """
-        Return the agent capabilities
-        
-        Following the A2A SDK pattern for agent capabilities
-        """
+        """Return the agent capabilities"""
         return {
             "name": self.name,
             "version": self.version,
             "description": self.description,
-            "skills": [
-                {
-                    "name": "generate_sql",
-                    "description": "Generate SQL queries from natural language",
-                    "parameters": [
-                        {
-                            "name": "query",
-                            "type": "string",
-                            "description": "Natural language query to convert to SQL",
-                            "required": True
-                        },
-                        {
-                            "name": "database_name",
-                            "type": "string",
-                            "description": "Target database name (optional)",
-                            "required": False
-                        },
-                        {
-                            "name": "format",
-                            "type": "string",
-                            "description": "Output format for results: json, csv, parquet, html, or summary (default: json)",
-                            "required": False
-                        }
-                    ]
-                },
-                {
-                    "name": "search_schema",
-                    "description": "Search database schema for relevant tables and columns",
-                    "parameters": [
-                        {
-                            "name": "query",
-                            "type": "string",
-                            "description": "Search query for schema elements",
-                            "required": True
-                        },
-                        {
-                            "name": "similarity_threshold",
-                            "type": "number",
-                            "description": "Similarity threshold for fuzzy matching (0.0-1.0)",
-                            "required": False
-                        },
-                        {
-                            "name": "database_name",
-                            "type": "string",
-                            "description": "Target database name (optional)",
-                            "required": False
-                        }
-                    ]
-                },
-                {
-                    "name": "execute_oracle_query",
-                    "description": "Execute SQL queries against Oracle database with format support",
-                    "parameters": [
-                        {
-                            "name": "sql_query",
-                            "type": "string",
-                            "description": "SQL query to execute",
-                            "required": True
-                        },
-                        {
-                            "name": "format",
-                            "type": "string",
-                            "description": "Output format: json, csv, parquet, html, or summary (default: json)",
-                            "required": False
-                        },
-                        {
-                            "name": "parameters",
-                            "type": "object",
-                            "description": "Query parameters for parameterized queries",
-                            "required": False
-                        }
-                    ]
-                },
-                {
-                    "name": "explain_query",
-                    "description": "Explain what a SQL query does in natural language",
-                    "parameters": [
-                        {
-                            "name": "sql_query",
-                            "type": "string",
-                            "description": "SQL query to explain",
-                            "required": True
-                        }
-                    ]
-                }
-            ],
-            "supported_formats": ["text", "function_call", "json", "csv", "parquet", "html", "summary"],
+            "skills": [],
+            "supported_formats": ["text", "json", "csv", "parquet", "html", "summary"],
             "streaming_support": True,
-            "concurrent_task_limit": 5
+            "streaming_only": True,
+            "synchronous_support": False,
+            "invoke_support": False,
+            "intermediate_thinking": True,
+            "real_time_processing": True,
+            "concurrent_task_limit": 5,
+            "supported_methods": ["stream"],
+            "deprecated_methods": ["invoke"],
+            "communication_patterns": {
+                "streaming": "Real-time Server-Sent Events with intermediate thinking steps",
+                "synchronous": "Not supported - all requests must use streaming",
+                "invoke": "Deprecated - returns error message directing to streaming"
+            },
+            "features": {
+                "schema_introspection": "Neo4j knowledge graph integration",
+                "multi_database_support": "Oracle database with connection routing",
+                "format_conversion": "Multiple output formats (JSON, CSV, HTML, Parquet, Summary)",
+                "query_optimization": "AI-powered SQL generation with performance considerations",
+                "error_handling": "Comprehensive error analysis and alternative suggestions"
+            },
+            "endpoints": {
+                "streaming": "/a2a/stream",
+                "deprecated_message": "/a2a/message",
+                "agent_card": "/a2a/agent-card",
+                "task_status": "/a2a/task/{task_id}",
+                "service_status": "/a2a/status"
+            }
         }
     
     async def invoke(self, task: Task) -> Task:
         """
-        Handle synchronous task invocation
+        DEPRECATED: invoke() method is not supported.
         
-        This is the main entry point for processing A2A messages
+        This agent is streaming-only. Use stream() method instead for real-time
+        processing with intermediate thinking steps.
         """
         task_id = str(uuid.uuid4())
-        task_info = TaskInfo(
+        return new_task(
             task_id=task_id,
-            status=TaskState.PENDING,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            request=task
+            state=TaskState.COMPLETED,
+            parts=[TextPart(text="❌ DEPRECATED: invoke() method is not supported. This agent is streaming-only. Please use the stream() method or /a2a/stream endpoint for real-time responses with intermediate thinking steps.")],
         )
-        
-        self.tasks[task_id] = task_info
-        
-        try:
-            logger.info(f"Processing A2A task {task_id}: {task.content if hasattr(task, 'content') else 'No content'}")
-            
-            # Update task status
-            task_info.status = TaskState.RUNNING
-            task_info.updated_at = datetime.utcnow()
-            
-            # Process the message
-            response_parts = await self._process_task(task)
-            
-            # Create response
-            response = new_task(
-                task_id=task_id,
-                state=TaskState.COMPLETED,
-                parts=response_parts
-            )
-            
-            # Update task info
-            task_info.status = TaskState.COMPLETED
-            task_info.response = response
-            task_info.updated_at = datetime.utcnow()
-            
-            logger.info(f"A2A task {task_id} completed successfully")
-            return response
-            
-        except Exception as e:
-            logger.error(f"A2A task {task_id} failed: {e}")
-            
-            # Update task with error
-            task_info.status = TaskState.FAILED
-            task_info.error = str(e)
-            task_info.updated_at = datetime.utcnow()
-            
-            # Return error response
-            return new_task(
-                task_id=task_id,
-                state=TaskState.FAILED,
-                parts=[TextPart(text=f"Error processing request: {str(e)}")],
-                error=str(e)
-            )
     
     async def stream(self, task: Task) -> Any:
-        """
-        Handle streaming task execution
-        
-        This allows for real-time streaming of responses
-        """
+        """Handle streaming task execution with real-time agent processing steps"""
         task_id = str(uuid.uuid4())
         task_info = TaskInfo(
             task_id=task_id,
             status=TaskState.RUNNING,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
             request=task
         )
         
@@ -268,63 +133,147 @@ class TextToSQLAgentExecutor(AgentExecutor):
         
         try:
             logger.info(f"Starting streaming A2A task {task_id}")
-            
-            # For streaming, we can break down the response into chunks
-            async def stream_generator():
-                # Start with a partial response
-                yield new_task(
-                    task_id=task_id,
-                    state=TaskState.RUNNING,
-                    parts=[TextPart(text="Processing your request...")],
-                    final=False
-                )
-                
-                # Process the actual request
-                response_parts = await self._process_task(task)
-                
-                # Send the final response
-                yield new_task(
-                    task_id=task_id,
-                    state=TaskState.COMPLETED,
-                    parts=response_parts,
-                    final=True
-                )
-                
-                # Update task status
-                task_info.status = TaskState.COMPLETED
-                task_info.updated_at = datetime.utcnow()
-            
-            return stream_generator()
+            return self._create_stream_generator(task_id, task)
             
         except Exception as e:
-            logger.error(f"Streaming A2A task {task_id} failed: {e}")
+            logger.error(f"Error setting up streaming for task {task_id}: {e}")
+            return self._create_error_generator(task_id, str(e))
+    
+    def _create_stream_generator(self, task_id: str, task: Task):
+        """Create the main streaming generator"""
+        async def stream_generator():
+            # Extract user text
+            user_text = self._extract_user_text(task)
+            if not user_text:
+                yield self._create_task_update(task_id, TaskState.COMPLETED, 
+                    "❌ No content to process. Please send a text message with your query.", final=True)
+                return
             
-            # Update task with error
-            task_info.status = TaskState.FAILED
-            task_info.error = str(e)
-            task_info.updated_at = datetime.utcnow()
+            # Setup agent processing
+            langchain_messages = [HumanMessage(content=user_text)]
+            thread_config = {"configurable": {"thread_id": task_id}}
             
-            # Return error in streaming format
-            async def error_generator():
-                yield new_task(
-                    task_id=task_id,
-                    state=TaskState.FAILED,
-                    parts=[TextPart(text=f"Error: {str(e)}")],
-                    final=True,
-                    error=str(e)
+            # Process with agent streaming
+            try:
+                yield self._create_task_update(task_id, TaskState.RUNNING, 
+                    f"🤔 Processing your query: {user_text}")
+                
+                # Stream agent steps
+                async for chunk in text2sql_agent.agent.astream(
+                    {"messages": langchain_messages}, 
+                    config=thread_config
+                ):
+                    async for update in self._process_agent_chunk(task_id, chunk):
+                        yield update
+                
+                # Get final result
+                final_result = await text2sql_agent.agent.ainvoke(
+                    {"messages": langchain_messages}, 
+                    config=thread_config
                 )
-            
-            return error_generator()
+                
+                final_response = self._extract_final_response(final_result)
+                yield self._create_task_update(task_id, TaskState.COMPLETED, 
+                    f"✅ {final_response}", final=True)
+                
+            except Exception as e:
+                logger.error(f"Error in agent streaming: {e}")
+                yield self._create_task_update(task_id, TaskState.FAILED, 
+                    f"❌ Error: {str(e)}", final=True)
+        
+        return stream_generator()
+    
+    def _create_error_generator(self, task_id: str, error_message: str):
+        """Create an error generator for failed tasks"""
+        async def error_generator():
+            yield self._create_task_update(task_id, TaskState.FAILED, 
+                f"Failed to process task: {error_message}", final=True)
+        return error_generator()
+    
+    def _extract_user_text(self, task: Task) -> str:
+        """Extract user text from task"""
+        if hasattr(task, 'content') and task.content:
+            return task.content
+        return ""
+    
+    async def _process_agent_chunk(self, task_id: str, chunk: Dict[str, Any]):
+        """Process a single chunk from agent streaming"""
+        if "agent" in chunk:
+            async for update in self._process_agent_messages(task_id, chunk["agent"]):
+                yield update
+        
+        elif "tools" in chunk:
+            async for update in self._process_tool_messages(task_id, chunk["tools"]):
+                yield update
+        
+        elif isinstance(chunk, dict):
+            async for update in self._process_other_chunk(task_id, chunk):
+                yield update
+    
+    async def _process_agent_messages(self, task_id: str, agent_data: Dict[str, Any]):
+        """Process agent thinking/reasoning messages"""
+        if "messages" in agent_data:
+            for message in agent_data["messages"]:
+                if hasattr(message, 'content') and message.content:
+                    yield self._create_task_update(task_id, TaskState.RUNNING, 
+                        f"🧠 Agent: {message.content}")
+    
+    async def _process_tool_messages(self, task_id: str, tools_data: Dict[str, Any]):
+        """Process tool call and result messages"""
+        if "messages" in tools_data:
+            for message in tools_data["messages"]:
+                if hasattr(message, 'name'):
+                    # Tool call
+                    tool_name = message.name
+                    yield self._create_task_update(task_id, TaskState.RUNNING, 
+                        f"🔧 Calling tool: {tool_name}")
+                    
+                    # Tool arguments
+                    tool_args = getattr(message, 'tool_input', {})
+                    if tool_args:
+                        args_str = json.dumps(tool_args, indent=2)
+                        yield self._create_task_update(task_id, TaskState.RUNNING, 
+                            f"📝 Tool arguments:\n```json\n{args_str}\n```")
+                
+                elif hasattr(message, 'content') and message.content:
+                    # Tool result
+                    result = message.content
+                    if len(result) > 500:
+                        result = result[:500] + "... (truncated)"
+                    yield self._create_task_update(task_id, TaskState.RUNNING, 
+                        f"📋 Tool result: {result}")
+    
+    async def _process_other_chunk(self, task_id: str, chunk: Dict[str, Any]):
+        """Process other types of chunks"""
+        for key, value in chunk.items():
+            if key not in ["agent", "tools"] and value:
+                yield self._create_task_update(task_id, TaskState.RUNNING, 
+                    f"⚙️ Processing {key}: {str(value)[:200]}")
+    
+    def _extract_final_response(self, final_result: Dict[str, Any]) -> str:
+        """Extract final response from agent result"""
+        if "messages" in final_result and final_result["messages"]:
+            last_message = final_result["messages"][-1]
+            if hasattr(last_message, 'content'):
+                return last_message.content
+        return "Processing completed."
+    
+    def _create_task_update(self, task_id: str, state: TaskState, text: str, final: bool = False) -> Task:
+        """Create a task update with the given parameters"""
+        return new_task(
+            task_id=task_id,
+            state=state,
+            parts=[TextPart(text=text)],
+            final=final
+        )
     
     async def cancel_task(self, task_id: str) -> bool:
-        """
-        Cancel a running task
-        """
+        """Cancel a running task"""
         if task_id in self.tasks:
             task_info = self.tasks[task_id]
             if task_info.status == TaskState.RUNNING:
                 task_info.status = TaskState.CANCELLED
-                task_info.updated_at = datetime.utcnow()
+                task_info.updated_at = datetime.now(timezone.utc)
                 logger.info(f"A2A task {task_id} cancelled")
                 return True
         
@@ -332,153 +281,8 @@ class TextToSQLAgentExecutor(AgentExecutor):
         return False
     
     async def get_task_status(self, task_id: str) -> Optional[TaskInfo]:
-        """
-        Get the status of a task
-        """
+        """Get the status of a task"""
         return self.tasks.get(task_id)
-    
-    async def _process_task(self, task: Task) -> List[Part]:
-        """
-        Process a task and return response parts
-        
-        This method handles both text and function call tasks
-        """
-        if not self.initialized:
-            return [TextPart(text="Agent is not properly initialized")]
-        
-        response_parts = []
-        
-        # Handle text content
-        if hasattr(task, 'content') and task.content:
-            response_part = await self._handle_text_message(task.content)
-            response_parts.append(response_part)
-        
-        # Handle function calls if present
-        if hasattr(task, 'function_calls') and task.function_calls:
-            for func_call in task.function_calls:
-                response_part = await self._handle_function_call(func_call.name, func_call.parameters)
-                response_parts.append(response_part)
-        
-        # If no content or function calls, return a default response
-        if not response_parts:
-            response_parts.append(TextPart(text="No content to process"))
-        
-        return response_parts
-    
-    async def _handle_text_message(self, text: str) -> Part:
-        """
-        Handle text messages by invoking the LangGraph agent
-        """
-        try:
-            # Convert to our internal format
-            messages = [ChatMessage(role="user", content=text)]
-            
-            # Invoke the agent
-            agent_response = await process_chat_request(messages)
-            
-            # Return the response
-            return TextPart(text=agent_response.message)
-            
-        except Exception as e:
-            logger.error(f"Error handling text message: {e}")
-            return TextPart(text=f"Error processing text message: {str(e)}")
-    
-    async def _handle_function_call(self, function_name: str, parameters: Dict[str, Any]) -> Part:
-        """
-        Handle function calls by routing to appropriate tools
-        """
-        try:
-            if function_name == "generate_sql":
-                # Generate SQL query
-                query = parameters.get("query", "")
-                database_name = parameters.get("database_name")
-                format_type = parameters.get("format", "json")
-                
-                # Create a query message that includes format preference
-                query_text = query
-                if database_name:
-                    query_text = f"In database '{database_name}': {query}"
-                if format_type != "json":
-                    query_text = f"{query_text} (format: {format_type})"
-                
-                messages = [ChatMessage(role="user", content=query_text)]
-                agent_response = await process_chat_request(messages)
-                
-                result = {
-                    "response": agent_response.message,
-                    "execution_time": agent_response.execution_time,
-                    "format": format_type
-                }
-                
-                # Include query results if available
-                if agent_response.query_results:
-                    result["query_results"] = {
-                        "query": agent_response.query_results.query,
-                        "results": agent_response.query_results.results,
-                        "row_count": agent_response.query_results.row_count
-                    }
-                
-                return TextPart(text=json.dumps(result, indent=2))
-            
-            elif function_name == "execute_oracle_query":
-                # Execute Oracle query directly with format support
-                sql_query = parameters.get("sql_query", "")
-                format_type = parameters.get("format", "json")
-                query_parameters = parameters.get("parameters", {})
-                
-                if not sql_query:
-                    return TextPart(text=json.dumps({"error": "sql_query parameter is required"}, indent=2))
-                
-                # Use the Oracle query tool directly
-                oracle_result = await oracle_query_tool.ainvoke({
-                    "query": sql_query,
-                    "parameters": query_parameters,
-                    "format": format_type
-                })
-                
-                return TextPart(text=oracle_result)
-            
-            elif function_name == "search_schema":
-                # Search schema
-                query = parameters.get("query", "")
-                similarity_threshold = parameters.get("similarity_threshold", 0.6)
-                database_name = parameters.get("database_name")
-                
-                # Use the search schema tool
-                search_result = await schema_search_tool.ainvoke({
-                    "search_terms": query,
-                    "similarity_threshold": similarity_threshold,
-                    "database_name": database_name
-                })
-                
-                return TextPart(text=search_result)
-            
-            elif function_name == "explain_query":
-                # Explain SQL query
-                sql_query = parameters.get("sql_query", "")
-                
-                # Use the agent to explain the query
-                explanation_prompt = f"Explain what this SQL query does in natural language: {sql_query}"
-                messages = [ChatMessage(role="user", content=explanation_prompt)]
-                agent_response = await process_chat_request(messages)
-                
-                result = {
-                    "explanation": agent_response.message,
-                    "query": sql_query
-                }
-                
-                return TextPart(text=json.dumps(result, indent=2))
-            
-            else:
-                return TextPart(
-                    text=json.dumps({"error": f"Unknown function: {function_name}"}, indent=2)
-                )
-                
-        except Exception as e:
-            logger.error(f"Error handling function call {function_name}: {e}")
-            return TextPart(
-                text=json.dumps({"error": f"Error executing function: {str(e)}"}, indent=2)
-            )
 
 
 # Global instance
@@ -486,15 +290,10 @@ text_to_sql_agent_executor = TextToSQLAgentExecutor()
 
 
 def get_agent_executor() -> TextToSQLAgentExecutor:
-    """
-    Get the global agent executor instance
-    """
+    """Get the global agent executor instance"""
     return text_to_sql_agent_executor
 
 
-# Health check function
 async def health_check() -> bool:
-    """
-    Check if the agent executor is healthy
-    """
+    """Check if the agent executor is healthy"""
     return text_to_sql_agent_executor.initialized 

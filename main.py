@@ -8,9 +8,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any
 import uvicorn
+import uuid
+import json
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import time
 import asyncio
 
@@ -25,6 +27,8 @@ from schema_introspection import schema_introspector
 
 # A2A SDK imports
 from a2a_agent_executor import get_agent_executor, health_check as a2a_health_check
+from a2a.types import Task, TaskState, TextPart
+from a2a.utils import new_task
 
 # Configure logging
 logging.basicConfig(
@@ -91,8 +95,8 @@ async def root():
         "docs": "/docs",
         "health": "/health",
         "a2a_agent_card": "/a2a/agent-card",
-        "a2a_message": "/a2a/message",
-        "a2a_stream": "/a2a/stream",
+        "a2a_message": "/a2a/message (deprecated)",
+        "a2a_stream": "/a2a/stream (use this for real-time streaming)",
         "a2a_task_status": "/a2a/task/{task_id}",
         "a2a_service_status": "/a2a/status"
     }
@@ -392,57 +396,100 @@ async def get_a2a_agent_card():
 @app.post("/a2a/message")
 async def send_a2a_message(request: Dict[str, Any]):
     """
-    Send a message to the A2A agent.
+    Send a message to the A2A agent (deprecated - use streaming instead).
     
-    This endpoint accepts messages in the A2A format and
-    returns responses in the same format.
+    This endpoint is deprecated. Use /a2a/stream for real-time streaming responses.
     """
     try:
         agent_executor = get_agent_executor()
         if not agent_executor:
             raise HTTPException(status_code=500, detail="Agent executor not available")
         
-        logger.info("Received A2A message request")
+        logger.info("Received A2A message request (deprecated)")
         
-        # Create a TaskRequest from the incoming request
-        # This is a simplified version - in real implementation,
-        # you would use the actual A2A SDK classes
-        task_request = type('TaskRequest', (), {
-            'message': type('Message', (), {
-                'parts': [
-                    type('Part', (), {
-                        'type': 'text',
-                        'text': request.get('message', '')
-                    })()
-                ]
-            })()
-        })()
-        
-        # Process the request
-        response = await agent_executor.invoke(task_request)
-        
-        # Return the response in A2A format
+        # Return deprecation notice
         return {
-            "task_id": response.task_id,
-            "status": response.status,
-            "message": {
-                "message_id": response.message.message_id,
-                "parts": [
-                    {
-                        "type": part.type,
-                        "text": getattr(part, 'text', None),
-                        "name": getattr(part, 'name', None),
-                        "result": getattr(part, 'result', None)
-                    }
-                    for part in response.message.parts
-                ],
-                "role": response.message.role,
-                "timestamp": response.message.timestamp
-            }
+            "error": "This endpoint is deprecated",
+            "message": "❌ DEPRECATED: Non-streaming A2A messages are not supported. This agent is streaming-only. Please use /a2a/stream for real-time responses with intermediate thinking steps.",
+            "streaming_endpoint": "/a2a/stream",
+            "status": "deprecated",
+            "supported_methods": ["stream"],
+            "deprecated_methods": ["invoke", "message"]
         }
         
     except Exception as e:
         logger.error(f"A2A message failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/a2a/stream")
+async def stream_a2a_message(request: Dict[str, Any]):
+    """
+    Stream a message to the A2A agent with real-time processing steps.
+    
+    This endpoint uses Server-Sent Events (SSE) to stream the agent's
+    real-time processing steps as they happen.
+    """
+    try:
+        agent_executor = get_agent_executor()
+        if not agent_executor:
+            raise HTTPException(status_code=500, detail="Agent executor not available")
+        
+        logger.info("Received A2A streaming request")
+        
+        # Extract message content
+        message_text = request.get('message', '')
+        if not message_text:
+            raise HTTPException(status_code=400, detail="No message content provided")
+        
+        # Create a Task object for streaming
+        task = new_task(
+            task_id=str(uuid.uuid4()),
+            state=TaskState.RUNNING,
+            parts=[TextPart(text=message_text)],
+        )
+        
+        # Set the content attribute that the agent executor expects
+        task.content = message_text
+        
+        # Stream the agent's processing steps
+        async def generate_stream():
+            try:
+                # Get the streaming generator from the agent executor
+                stream_generator = await agent_executor.stream(task)
+                
+                # Stream each update as Server-Sent Events
+                async for update in stream_generator:
+                    # Format as SSE
+                    if hasattr(update, 'parts') and update.parts:
+                        for part in update.parts:
+                            if hasattr(part, 'text'):
+                                # Send the text content as SSE
+                                yield f"data: {json.dumps({'text': part.text, 'task_id': update.task_id, 'state': update.state})}\n\n"
+                    
+                    # Check if this is the final update
+                    if hasattr(update, 'final') and update.final:
+                        yield f"data: {json.dumps({'finished': True, 'task_id': update.task_id})}\n\n"
+                        break
+                
+            except Exception as e:
+                logger.error(f"Error in A2A streaming: {e}")
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        
+        # Return streaming response
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Cache-Control"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"A2A streaming failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
