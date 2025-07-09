@@ -116,6 +116,12 @@ class TextToSQLAgentExecutor(AgentExecutor):
                             "type": "string",
                             "description": "Target database name (optional)",
                             "required": False
+                        },
+                        {
+                            "name": "format",
+                            "type": "string",
+                            "description": "Output format for results: json, csv, parquet, html, or summary (default: json)",
+                            "required": False
                         }
                     ]
                 },
@@ -134,6 +140,36 @@ class TextToSQLAgentExecutor(AgentExecutor):
                             "type": "number",
                             "description": "Similarity threshold for fuzzy matching (0.0-1.0)",
                             "required": False
+                        },
+                        {
+                            "name": "database_name",
+                            "type": "string",
+                            "description": "Target database name (optional)",
+                            "required": False
+                        }
+                    ]
+                },
+                {
+                    "name": "execute_oracle_query",
+                    "description": "Execute SQL queries against Oracle database with format support",
+                    "parameters": [
+                        {
+                            "name": "sql_query",
+                            "type": "string",
+                            "description": "SQL query to execute",
+                            "required": True
+                        },
+                        {
+                            "name": "format",
+                            "type": "string",
+                            "description": "Output format: json, csv, parquet, html, or summary (default: json)",
+                            "required": False
+                        },
+                        {
+                            "name": "parameters",
+                            "type": "object",
+                            "description": "Query parameters for parameterized queries",
+                            "required": False
                         }
                     ]
                 },
@@ -150,7 +186,7 @@ class TextToSQLAgentExecutor(AgentExecutor):
                     ]
                 }
             ],
-            "supported_formats": ["text", "function_call"],
+            "supported_formats": ["text", "function_call", "json", "csv", "parquet", "html", "summary"],
             "streaming_support": True,
             "concurrent_task_limit": 5
         }
@@ -356,27 +392,63 @@ class TextToSQLAgentExecutor(AgentExecutor):
                 # Generate SQL query
                 query = parameters.get("query", "")
                 database_name = parameters.get("database_name")
+                format_type = parameters.get("format", "json")
                 
-                messages = [ChatMessage(role="user", content=query)]
+                # Create a query message that includes format preference
+                query_text = query
+                if database_name:
+                    query_text = f"In database '{database_name}': {query}"
+                if format_type != "json":
+                    query_text = f"{query_text} (format: {format_type})"
+                
+                messages = [ChatMessage(role="user", content=query_text)]
                 agent_response = await process_chat_request(messages)
                 
                 result = {
-                    "sql_query": agent_response.sql_query,
-                    "explanation": agent_response.message,
-                    "execution_time": agent_response.execution_time
+                    "response": agent_response.message,
+                    "execution_time": agent_response.execution_time,
+                    "format": format_type
                 }
                 
+                # Include query results if available
+                if agent_response.query_results:
+                    result["query_results"] = {
+                        "query": agent_response.query_results.query,
+                        "results": agent_response.query_results.results,
+                        "row_count": agent_response.query_results.row_count
+                    }
+                
                 return TextPart(text=json.dumps(result, indent=2))
+            
+            elif function_name == "execute_oracle_query":
+                # Execute Oracle query directly with format support
+                sql_query = parameters.get("sql_query", "")
+                format_type = parameters.get("format", "json")
+                query_parameters = parameters.get("parameters", {})
+                
+                if not sql_query:
+                    return TextPart(text=json.dumps({"error": "sql_query parameter is required"}, indent=2))
+                
+                # Use the Oracle query tool directly
+                oracle_result = await oracle_query_tool.ainvoke({
+                    "query": sql_query,
+                    "parameters": query_parameters,
+                    "format": format_type
+                })
+                
+                return TextPart(text=oracle_result)
             
             elif function_name == "search_schema":
                 # Search schema
                 query = parameters.get("query", "")
                 similarity_threshold = parameters.get("similarity_threshold", 0.6)
+                database_name = parameters.get("database_name")
                 
                 # Use the search schema tool
                 search_result = await schema_search_tool.ainvoke({
                     "search_terms": query,
-                    "similarity_threshold": similarity_threshold
+                    "similarity_threshold": similarity_threshold,
+                    "database_name": database_name
                 })
                 
                 return TextPart(text=search_result)
